@@ -8,7 +8,7 @@
     "mcp-tool-filter-server": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/build-cli.js",
+    "build": "rm -rf bin build && tsc && node scripts/build-cli.js",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"

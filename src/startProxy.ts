@@ -1,7 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { getConfig } from "./config";
-import { FilterProxy } from "./proxy";
+import { getConfig } from "./config.js";
+import { FilterProxy } from "./proxy.js";
 
 export async function startProxy(): Promise<void> {
   const config = getConfig();
@@ -9,7 +9,7 @@ export async function startProxy(): Promise<void> {
 
   if (config.proxy.transport === "http") {
     const http = await import("node:http");
-    const CORS_HEADERS = {
+    const corsHeaders = {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
         "Content-Type, Authorization, Mcp-Protocol-Version",
@@ -19,7 +19,7 @@ export async function startProxy(): Promise<void> {
       const origin = req.headers.origin;
       if (origin) {
         res.setHeader("Access-Control-Allow-Origin", origin);
-        Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+        Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
       }
       if (req.method === "OPTIONS") {
         res.writeHead(204);

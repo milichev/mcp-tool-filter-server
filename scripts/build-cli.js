@@ -3,7 +3,7 @@ import { readFileSync } from "fs";
 import { chmod } from "fs/promises";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
-import { nodeExternalsPlugin } from "esbuild-node-externals";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // see https://github.com/evanw/esbuild/pull/2067
@@ -26,17 +26,18 @@ async function build() {
     target: "node18",
     format: "esm",
     outfile: "bin/cli.mjs",
-    banner: {
-      js: jsBanner,
-    },
-    // external: ["util", "onnxruntime-node", "sharp"],
-    plugins: [nodeExternalsPlugin()],
+    banner: { js: jsBanner },
+    // @xenova/transformers statically imports both onnx packages.
+    // onnxruntime-node contains native .node binaries that cannot be bundled.
+    // onnxruntime-web must also stay external to avoid bundling its wasm assets.
+    // sharp is an optional transitive dep with native binaries.
+    // All three must be present in node_modules at runtime.
+    external: ["onnxruntime-node", "onnxruntime-web", "sharp"],
     define: {
       __BUNDLED_INSTRUCTIONS__: JSON.stringify(instructions),
     },
   });
 
-  // Make the output file executable
   await chmod("./bin/cli.mjs", 0o755);
 }
 
