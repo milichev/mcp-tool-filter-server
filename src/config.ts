@@ -1,27 +1,20 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import type { EmbeddingConfig } from "@portkey-ai/mcp-tool-filter";
 import { z } from "zod";
+import { type LevelWithSilent } from "pino";
+import {
+  loadEnvFile,
+  stringToArray,
+  EnvSchema,
+  parseCommaSeparatedArgs,
+  unquote,
+  substHomeDir,
+  resolveFileRef,
+  isFileRef,
+} from "./config-utils.js";
+import { readFileSync } from "node:fs";
+import { bundledInstructions } from "./resolveInstructions.js";
 
-const dotenvFile = join(process.cwd(), ".env");
-if (existsSync(dotenvFile)) {
-  process.loadEnvFile(dotenvFile);
-}
-
-const stringToArray = z.preprocess((val) => {
-  if (!val || typeof val !== "string") return undefined;
-  return val.split(/,/).map((s) => s.replace(/\\,/g, ","));
-}, z.array(z.string()).default([]));
-
-const stringToRecord = z.preprocess((val) => {
-  if (!val || typeof val !== "string") return undefined;
-  return Object.fromEntries(
-    val.split(",").map((i) => {
-      const [k, ...v] = i.split(":");
-      return [k, v.join(":")].map((s) => s.trim());
-    }),
-  );
-}, z.record(z.string(), z.string()).default({}));
+loadEnvFile();
 
 const EmbeddingConfigSchema = z.discriminatedUnion("provider", [
   z.object({
@@ -57,9 +50,9 @@ const UpstreamSchema = z.discriminatedUnion("transport", [
   z.object({
     transport: z.literal("stdio"),
     command: z.string().default("npx"),
-    args: stringToArray.default([]),
-    env: stringToRecord.default({}),
-    cwd: z.string().optional(),
+    args: stringToArray.default([]).transform((args) => args.map(substHomeDir)),
+    env: EnvSchema.default({}),
+    cwd: z.string().default(process.cwd()).optional(),
   }),
 
   z.object({
@@ -79,6 +72,19 @@ const ProxySchema = z.discriminatedUnion("transport", [
   }),
 ]);
 
+const InstructionsSchema = z
+  .string()
+  .optional()
+  .transform((v): string | false => {
+    if (v === "false") return false;
+    v = unquote(v ?? "");
+    return (
+      (isFileRef(v)
+        ? readFileSync(resolveFileRef(v), { encoding: "utf8" })
+        : bundledInstructions()) ?? false
+    );
+  });
+
 const ConfigSchema = z.object({
   upstream: UpstreamSchema.default({
     transport: "stdio",
@@ -89,10 +95,19 @@ const ConfigSchema = z.object({
   proxy: ProxySchema.default({ transport: "stdio" }),
   filter: FilterConfigSchema.default({}),
   embedding: EmbeddingConfigSchema,
+  instructions: InstructionsSchema,
   logLevel: z
-    .enum(["trace", "debug", "info", "warn", "error", "silent"])
+    .enum([
+      "trace",
+      "debug",
+      "info",
+      "warn",
+      "error",
+      "silent",
+    ] satisfies LevelWithSilent[])
     .optional()
     .default("info"),
+  isDev: z.boolean().default(false),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -109,9 +124,9 @@ const parseNum = (raw: string | undefined): number | undefined =>
 const parseBool = (raw: string | undefined): boolean | undefined =>
   raw !== undefined ? raw === "true" : undefined;
 
-const getPrefixedRaw = (prefix: string) =>
+const getPrefixedRaw = (prefix: string, env: typeof process.env) =>
   Object.fromEntries(
-    Object.entries(process.env)
+    Object.entries(env)
       .filter(([k]) => k.startsWith(prefix))
       .map(([k, v]) => [k.slice(prefix.length).toLowerCase(), v]),
   );
@@ -120,43 +135,45 @@ let config: Config | undefined;
 
 export function getConfig(): Config {
   if (!config) {
-    const provider = process.env.EMBEDDING_PROVIDER ?? "local";
+    const env = process.env;
+    const provider = env.EMBEDDING_PROVIDER ?? "local";
 
     const embeddingRaw =
       provider === "local"
         ? {
             provider: "local" as const,
-            model: process.env.EMBEDDING_MODEL,
-            quantized: parseBool(process.env.EMBEDDING_QUANTIZED),
+            model: env.EMBEDDING_MODEL,
+            quantized: parseBool(env.EMBEDDING_QUANTIZED),
           }
         : {
             provider,
-            apiKey: process.env.EMBEDDING_API_KEY,
-            model: process.env.EMBEDDING_MODEL,
-            dimensions: parseNum(process.env.EMBEDDING_DIMENSIONS),
-            baseURL: process.env.EMBEDDING_BASE_URL,
+            apiKey: env.EMBEDDING_API_KEY,
+            model: env.EMBEDDING_MODEL,
+            dimensions: parseNum(env.EMBEDDING_DIMENSIONS),
+            baseURL: env.EMBEDDING_BASE_URL,
           };
 
-    const upstreamRaw = getPrefixedRaw("UPSTREAM_MCP_");
-    const proxyRaw = getPrefixedRaw("PROXY_MCP_");
+    const upstreamRaw = getPrefixedRaw("UPSTREAM_MCP_", env);
+    const proxyRaw = getPrefixedRaw("PROXY_MCP_", env);
 
     config = ConfigSchema.parse({
       upstream: upstreamRaw,
       proxy: proxyRaw,
       filter: {
-        topK: parseNum(process.env.FILTER_TOP_K),
-        minScore: parseNum(process.env.FILTER_MIN_SCORE),
-        contextMessages: parseNum(process.env.FILTER_CONTEXT_MESSAGES),
-        alwaysInclude: parseList(process.env.FILTER_ALWAYS_INCLUDE),
-        exclude: parseList(process.env.FILTER_EXCLUDE),
-        maxContextTokens: parseNum(process.env.FILTER_MAX_CONTEXT_TOKENS),
+        topK: parseNum(env.FILTER_TOP_K),
+        minScore: parseNum(env.FILTER_MIN_SCORE),
+        contextMessages: parseNum(env.FILTER_CONTEXT_MESSAGES),
+        alwaysInclude: parseList(env.FILTER_ALWAYS_INCLUDE),
+        exclude: parseList(env.FILTER_EXCLUDE),
+        maxContextTokens: parseNum(env.FILTER_MAX_CONTEXT_TOKENS),
         includeServerDescription: parseBool(
-          process.env.FILTER_INCLUDE_SERVER_DESCRIPTION,
+          env.FILTER_INCLUDE_SERVER_DESCRIPTION,
         ),
-        debug: parseBool(process.env.FILTER_DEBUG),
+        debug: parseBool(env.FILTER_DEBUG),
       },
       embedding: embeddingRaw,
-      logLevel: process.env.LOG_LEVEL,
+      logLevel: env.LOG_LEVEL,
+      isDev: env.NODE_ENV === "development",
     });
   }
 

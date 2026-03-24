@@ -2,6 +2,7 @@ import { MCPToolFilter } from "@portkey-ai/mcp-tool-filter";
 import type {
   MCPServer,
   MCPTool,
+  MCPToolFilterConfig,
   ScoredTool,
 } from "@portkey-ai/mcp-tool-filter";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,10 +14,11 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { Logger } from "pino";
 import * as packageJson from "../package.json" with { type: "json" };
 import { getConfig } from "./config.js";
-
-const UPSTREAM_SERVER_ID = "upstream";
+import { getLogger } from "./logger.js";
+import { resolveInstructions } from "./resolveInstructions.js";
 
 /**
  * Clients that cooperate with the filter can pass a plain-text context hint
@@ -28,69 +30,84 @@ export class FilterProxy {
   private upstreamClient: Client;
   private filter: MCPToolFilter;
   private initialized = false;
+  private upstreamInstructions: string | undefined;
 
-  private constructor() {
+  private constructor(private readonly logger: Logger) {
     const config = getConfig();
     this.upstreamClient = new Client(
       {
-        name: "mcp-tool-filter-server-upstream-client",
+        name: `${packageJson.default.name}-upstream-client`,
         version: packageJson.default.version,
       },
       { capabilities: {} },
     );
-    this.filter = new MCPToolFilter({
+
+    const toolFilterConfig: MCPToolFilterConfig = {
       embedding: config.embedding,
-      defaultOptions: {
-        topK: config.filter.topK,
-        minScore: config.filter.minScore,
-        contextMessages: config.filter.contextMessages,
-        alwaysInclude: config.filter.alwaysInclude,
-        exclude: config.filter.exclude,
-        maxContextTokens: config.filter.maxContextTokens,
-      },
+      defaultOptions: config.filter,
       includeServerDescription: config.filter.includeServerDescription,
-      debug: config.filter.debug,
-    });
+      debug: config.filter.debug || logger.isLevelEnabled("debug"),
+    };
+    this.logger.info({ config: toolFilterConfig }, "MCPToolFilter config");
+    this.filter = new MCPToolFilter(toolFilterConfig);
   }
 
   static async create(): Promise<FilterProxy> {
-    const proxy = new FilterProxy();
+    const proxyLogger = getLogger().child({
+      component: "proxy",
+    });
+    const proxy = new FilterProxy(proxyLogger);
     await proxy.connectUpstream();
     await proxy.initFilter();
     return proxy;
   }
 
   private createUpstreamTransport() {
-    const { upstream: upstreamConfig } = getConfig();
-    switch (upstreamConfig?.transport) {
+    const { upstream } = getConfig();
+    this.logger.debug({ upstream }, "Initializing upstream transport...");
+    switch (upstream?.transport) {
       case "http":
-        return new StreamableHTTPClientTransport(new URL(upstreamConfig.url));
+        return new StreamableHTTPClientTransport(new URL(upstream.url));
       case "stdio":
-        return new StdioClientTransport(upstreamConfig);
+        return new StdioClientTransport(upstream);
       default:
-        throw new Error(
-          `Invalid upstream config: ${JSON.stringify(upstreamConfig)}`,
-        );
+        throw new Error(`Invalid upstream config: ${JSON.stringify(upstream)}`);
     }
   }
 
   private async connectUpstream(): Promise<void> {
     await this.upstreamClient.connect(this.createUpstreamTransport());
+    const upstreamInstructions = this.upstreamClient.getInstructions();
+    this.upstreamInstructions = await resolveInstructions(
+      getConfig().instructions,
+      upstreamInstructions,
+    );
+    this.logger.debug(
+      { instructions: this.upstreamInstructions },
+      "Upstream connected",
+    );
   }
 
   private async initFilter(): Promise<void> {
     const { tools: upstreamTools } = await this.upstreamClient.listTools();
+    const toolsToFilter = upstreamTools.map(
+      (t): MCPTool => ({
+        name: t.name,
+        description: t.description ?? "",
+        inputSchema: t.inputSchema as Record<string, unknown>,
+      }),
+    );
     const mcpServer: MCPServer = {
-      id: UPSTREAM_SERVER_ID,
+      id: "upstream",
       name: "upstream",
-      tools: upstreamTools.map(
-        (t): MCPTool => ({
-          name: t.name,
-          description: t.description ?? "",
-          inputSchema: t.inputSchema as Record<string, unknown>,
-        }),
-      ),
+      tools: toolsToFilter,
     };
+    if (this.logger.isLevelEnabled("debug")) {
+      this.logger.debug(
+        { tools: toolsToFilter.map(({ name }) => name) },
+        "Initializing filter",
+      );
+    }
     await this.filter.initialize([mcpServer]);
     this.initialized = true;
   }
@@ -106,15 +123,13 @@ export class FilterProxy {
     const meta = params._meta;
     if (meta === null || typeof meta !== "object") return undefined;
     const value = (meta as Record<string, unknown>)[FILTER_CONTEXT_KEY];
-    return typeof value === "string" && value.trim().length > 0
-      ? value.trim()
-      : undefined;
+    return (typeof value === "string" && value.trim()) || undefined;
   }
 
   createProxyMCPServer(): Server {
     const server = new Server(
-      { name: "mcp-tool-filter-server", version: packageJson.default.version },
-      { capabilities: { tools: {} } },
+      { name: packageJson.default.name, version: packageJson.default.version },
+      { capabilities: { tools: {} }, instructions: this.upstreamInstructions },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async (request) => {
@@ -129,28 +144,38 @@ export class FilterProxy {
       if (!filterContext) {
         // No context hint — return all tools unfiltered.
         // Covers: MCP Inspector, first turn, any non-cooperating client.
-        const { tools } = await this.upstreamClient.listTools();
+        const { tools }: { tools: Tool[] } =
+          await this.upstreamClient.listTools();
+        this.logger.debug({ tools }, "tools/list: no context hint");
         return { tools };
       }
 
       const { tools: scored }: { tools: ScoredTool[] } =
         await this.filter.filter(filterContext);
 
-      const tools: Tool[] = scored.map((s) => ({
-        name: s.toolName,
-        description: s.tool.description,
-        inputSchema: (s.tool.inputSchema ?? {
-          type: "object",
-          properties: {},
-        }) as Tool["inputSchema"],
-      }));
+      const tools = scored.map(
+        (s): Tool => ({
+          name: s.toolName,
+          description: s.tool.description,
+          inputSchema: (s.tool.inputSchema ?? {
+            type: "object",
+            properties: {},
+          }) as Tool["inputSchema"],
+        }),
+      );
 
+      this.logger.debug(
+        { tools, filter: filterContext },
+        "tools/list: filtered by context",
+      );
       return { tools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-      return this.upstreamClient.callTool({ name, arguments: args });
+      const { name, arguments: args, task, _meta } = request.params;
+      const params = { name, arguments: args, task, _meta };
+      this.logger.debug({ params }, `tools/call: ${name}`);
+      return this.upstreamClient.callTool(params);
     });
 
     return server;
