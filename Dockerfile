@@ -1,65 +1,51 @@
 # syntax=docker/dockerfile:1
-
-# ─────────────────────────────────────────────
-# Stage 1: build
-# ─────────────────────────────────────────────
-FROM node:24-slim AS build
+FROM node:25-slim AS build
 WORKDIR /app
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install build-essential if any native deps need compilation (usually not for sharp/onnx)
+# RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+COPY package.json package-lock.json ./
+RUN npm ci
 
-COPY tsconfig.json instructions.md ./
-COPY src ./src
-COPY scripts ./scripts
+COPY . .
+RUN npm run build-cli
 
-RUN pnpm exec tsc --noEmit && node scripts/build-cli.js
-
-# ─────────────────────────────────────────────
-# Stage 2: runtime
-#
-# @xenova/transformers statically imports onnxruntime-node and sharp.
-# Both ship platform-specific native binaries that must match the runtime OS/arch.
-# We install them directly with npm (not pnpm) so postinstall scripts run and
-# download the correct prebuilt binaries for the container platform.
-# ─────────────────────────────────────────────
-FROM node:24-slim AS runtime
+FROM node:25-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Declare ARGs for build-time propagation
+ARG LOG_LEVEL=info
+ARG UPSTREAM_MCP_TRANSPORT=stdio
+ARG UPSTREAM_MCP_URL=
+ARG UPSTREAM_MCP_COMMAND=
+ARG UPSTREAM_MCP_ARGS=
+ARG UPSTREAM_MCP_ENV=
+ARG UPSTREAM_MCP_CWD=
 
-# Install JS deps via pnpm (no native postinstall needed for pure-JS packages)
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod --shamefully-hoist --ignore-scripts
+ARG PROXY_MCP_TRANSPORT=stdio
+ARG PROXY_MCP_PORT=3129
 
-# Re-install native deps via npm so their postinstall scripts run and fetch
-# the correct platform binaries for this container's OS/arch.
-RUN npm install --no-save --ignore-scripts=false \
-    onnxruntime-node@1.14.0 \
-    onnxruntime-node@1.24.3 \
-    sharp
+ARG EMBEDDING_PROVIDER=local
 
-COPY --from=build /app/bin/cli.mjs ./bin/cli.mjs
-COPY upstream/cli.mjs ./upstream/cli.mjs
+# Convert ARGs to ENVs so they persist at runtime
+ENV LOG_LEVEL=${LOG_LEVEL} \
+    UPSTREAM_MCP_TRANSPORT=${UPSTREAM_MCP_TRANSPORT} \
+    UPSTREAM_MCP_URL=${UPSTREAM_MCP_URL} \
+    UPSTREAM_MCP_COMMAND=${UPSTREAM_MCP_COMMAND} \
+    UPSTREAM_MCP_ARGS=${UPSTREAM_MCP_ARGS} \
+    UPSTREAM_MCP_ENV=${UPSTREAM_MCP_ENV} \
+    UPSTREAM_MCP_CWD=${UPSTREAM_MCP_CWD} \
+    PROXY_MCP_TRANSPORT=${PROXY_MCP_TRANSPORT} \
+    PROXY_MCP_PORT=${PROXY_MCP_PORT} \
+    EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER}
 
-# ── anytype-mcp upstream env vars ────────────────────────────────────────────
-ENV OPENAPI_MCP_HEADERS="" \
-    ANYTYPE_API_BASE_URL="" \
-    MCP_PASSTHROUGH_HEADERS="" \
-    MCP_INSTRUCTIONS="" \
-    DISCOVERY_TOOL_CONFIG=""
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts=false
 
-# ── filter proxy config ───────────────────────────────────────────────────────
-ENV UPSTREAM_MCP_TRANSPORT=stdio \
-    UPSTREAM_MCP_COMMAND=node \
-    UPSTREAM_MCP_ARGS=./upstream/cli.mjs \
-    PROXY_MCP_TRANSPORT=http \
-    PROXY_MCP_PORT=3000 \
-    EMBEDDING_PROVIDER=local
+COPY --from=build /app/bin/mcp-tool-filter-server.mjs ./bin/mcp-tool-filter-server.mjs
+COPY upstream/* ./upstream/
 
-EXPOSE 3000
-
-ENTRYPOINT ["node", "bin/cli.mjs"]
+EXPOSE ${PROXY_MCP_PORT}
+ENTRYPOINT ["node", "bin/mcp-tool-filter-server.mjs"]

@@ -46,7 +46,7 @@ export class FilterProxy {
       embedding: config.embedding,
       defaultOptions: config.filter,
       includeServerDescription: config.filter.includeServerDescription,
-      debug: config.filter.debug || logger.isLevelEnabled("debug"),
+      debug: config.filter.debug,
     };
     this.logger.info({ config: toolFilterConfig }, "MCPToolFilter config");
     this.filter = new MCPToolFilter(toolFilterConfig);
@@ -69,7 +69,10 @@ export class FilterProxy {
       case "http":
         return new StreamableHTTPClientTransport(new URL(upstream.url));
       case "stdio":
-        return new StdioClientTransport(upstream);
+        return new StdioClientTransport({
+          ...upstream,
+          stderr: "inherit",
+        });
       default:
         throw new Error(`Invalid upstream config: ${JSON.stringify(upstream)}`);
     }
@@ -118,12 +121,9 @@ export class FilterProxy {
    * (e.g. `{ progressToken: N }`).
    */
   private extractFilterContext(
-    params: Record<string, unknown>,
+    params: Record<string, unknown> | undefined,
   ): string | undefined {
-    const meta = params._meta;
-    if (meta === null || typeof meta !== "object") return undefined;
-    const value = (meta as Record<string, unknown>)[FILTER_CONTEXT_KEY];
-    return (typeof value === "string" && value.trim()) || undefined;
+    return (params?._meta as Record<string, string>)?.[FILTER_CONTEXT_KEY];
   }
 
   createProxyMCPServer(): Server {
@@ -137,9 +137,8 @@ export class FilterProxy {
         throw new Error("Filter not initialized");
       }
 
-      const filterContext = this.extractFilterContext(
-        (request.params ?? {}) as Record<string, unknown>,
-      );
+      const { params } = request;
+      const filterContext = this.extractFilterContext(params);
 
       if (!filterContext) {
         // No context hint — return all tools unfiltered.
@@ -150,7 +149,7 @@ export class FilterProxy {
         return { tools };
       }
 
-      const { tools: scored }: { tools: ScoredTool[] } =
+      const { tools: scored, metrics } =
         await this.filter.filter(filterContext);
 
       const tools = scored.map(
@@ -165,7 +164,7 @@ export class FilterProxy {
       );
 
       this.logger.debug(
-        { tools, filter: filterContext },
+        { tools, filter: filterContext, metrics },
         "tools/list: filtered by context",
       );
       return { tools };

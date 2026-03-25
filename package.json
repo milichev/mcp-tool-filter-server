@@ -19,10 +19,13 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf bin build .cache && tsc && node build-cli.js",
+    "clean": "rm -rf bin build .cache",
+    "build-cli": "node build-cli.js",
+    "build": "npm run clean && tsc && npm run build-cli",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest"
   },
   "keywords": [
     "mcp",
@@ -41,9 +44,11 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pino": "^7.0.4",
+    "@vitest/coverage-v8": "^4.1.1",
     "esbuild": "^0.27.4",
     "esbuild-node-externals": "^1.20.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.1"
   }
 }

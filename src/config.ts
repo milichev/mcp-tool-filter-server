@@ -5,7 +5,6 @@ import {
   loadEnvFile,
   stringToArray,
   EnvSchema,
-  parseCommaSeparatedArgs,
   unquote,
   substHomeDir,
   resolveFileRef,
@@ -45,6 +44,7 @@ const FilterConfigSchema = z.object({
   includeServerDescription: z.boolean().default(false).optional(),
   debug: z.boolean().default(false).optional(),
 });
+type FilterConfig = z.infer<typeof FilterConfigSchema>;
 
 const UpstreamSchema = z.discriminatedUnion("transport", [
   z.object({
@@ -61,11 +61,18 @@ const UpstreamSchema = z.discriminatedUnion("transport", [
     url: z.url(),
   }),
 ]);
+type Upstream = z.infer<typeof UpstreamSchema>;
+const DEFAULT_UPSTREAM = {
+  transport: "stdio",
+  command: "npx",
+  args: [],
+  env: {},
+} satisfies Upstream;
 
 const ProxySchema = z.discriminatedUnion("transport", [
   z.object({
     transport: z.literal("http"),
-    port: z.coerce.number().int().positive().default(3000).optional(),
+    port: z.coerce.number().int().positive().optional().default(3000),
   }),
   z.object({
     transport: z.literal("stdio"),
@@ -85,31 +92,24 @@ const InstructionsSchema = z
     );
   });
 
+const LogLevelSchema = z.enum([
+  "trace",
+  "debug",
+  "info",
+  "warn",
+  "error",
+  "silent",
+] satisfies LevelWithSilent[]);
+
 const ConfigSchema = z.object({
-  upstream: UpstreamSchema.default({
-    transport: "stdio",
-    command: "npx",
-    args: [],
-    env: {},
-  }).optional(),
+  upstream: UpstreamSchema.default(DEFAULT_UPSTREAM).optional(),
   proxy: ProxySchema.default({ transport: "stdio" }),
   filter: FilterConfigSchema.default({}),
   embedding: EmbeddingConfigSchema,
   instructions: InstructionsSchema,
-  logLevel: z
-    .enum([
-      "trace",
-      "debug",
-      "info",
-      "warn",
-      "error",
-      "silent",
-    ] satisfies LevelWithSilent[])
-    .optional()
-    .default("info"),
+  logLevel: LogLevelSchema.optional().default("info"),
   isDev: z.boolean().default(false),
 });
-
 export type Config = z.infer<typeof ConfigSchema>;
 
 const parseList = (raw: string | undefined): string[] | undefined =>

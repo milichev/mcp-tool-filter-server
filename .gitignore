@@ -2,6 +2,7 @@
 bin/
 build/
 dist/
+upstream/
 upstream/cli.mjs
 node_modules
 *.tgz
