@@ -31,6 +31,7 @@ export class FilterProxy {
   private filter: MCPToolFilter;
   private initialized = false;
   private upstreamInstructions: string | undefined;
+  private alwaysExclude: Set<string>;
 
   private constructor(private readonly logger: Logger) {
     const config = getConfig();
@@ -50,6 +51,7 @@ export class FilterProxy {
     };
     this.logger.info({ config: toolFilterConfig }, "MCPToolFilter config");
     this.filter = new MCPToolFilter(toolFilterConfig);
+    this.alwaysExclude = new Set(config.filter.exclude ?? []);
   }
 
   static async create(): Promise<FilterProxy> {
@@ -143,14 +145,23 @@ export class FilterProxy {
       if (!filterContext) {
         // No context hint — return all tools unfiltered.
         // Covers: MCP Inspector, first turn, any non-cooperating client.
-        const { tools }: { tools: Tool[] } =
+        let { tools: upstreamTools }: { tools: Tool[] } =
           await this.upstreamClient.listTools();
-        this.logger.debug({ tools }, "tools/list: no context hint");
-        return { tools };
+        if (this.alwaysExclude.size > 0) {
+          upstreamTools = upstreamTools.filter(
+            (t) => !this.alwaysExclude.has(t.name),
+          );
+        }
+        this.logger.debug(
+          { tools: upstreamTools },
+          "tools/list: no context hint",
+        );
+        return { tools: upstreamTools };
       }
 
-      const { tools: scored, metrics } =
-        await this.filter.filter(filterContext);
+      const { tools: scored, metrics } = await this.filter.filter(
+        filterContext ?? "",
+      );
 
       const tools = scored.map(
         (s): Tool => ({
