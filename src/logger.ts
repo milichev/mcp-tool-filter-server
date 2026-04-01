@@ -8,18 +8,22 @@ let logger: Logger | undefined;
 export function getLogger() {
   if (!logger) {
     const { logLevel, isDev } = getConfig();
-    const destination = pino.destination(2); // Always stderr
+    const destination = pino.destination({
+      // Always stderr:
+      dest: 2,
+      sync: true,
+    });
+
+    const isTerminal = process.stderr.isTTY;
 
     const transport = isDev
       ? pretty({
           destination,
-          colorize: true,
+          colorize: !!isTerminal,
           translateTime: "SYS:standard",
           ignore: "pid,hostname",
         })
-      : pino.transport({
-          target: "pino/file",
-        });
+      : destination;
 
     logger = pino(
       {

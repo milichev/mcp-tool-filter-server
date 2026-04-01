@@ -71,10 +71,15 @@ export class FilterProxy {
       case "http":
         return new StreamableHTTPClientTransport(new URL(upstream.url));
       case "stdio":
-        return new StdioClientTransport({
+        const transport = new StdioClientTransport({
           ...upstream,
-          stderr: "inherit",
+          stderr: "pipe",
         });
+        const upstreamLogger = this.logger.child({ component: "upstream-mcp" });
+        transport.stderr!.on("data", (chunk: Buffer) => {
+          upstreamLogger.debug(chunk.toString().trim());
+        });
+        return transport;
       default:
         throw new Error(`Invalid upstream config: ${JSON.stringify(upstream)}`);
     }
@@ -153,7 +158,7 @@ export class FilterProxy {
           );
         }
         this.logger.debug(
-          { tools: upstreamTools },
+          { tools: upstreamTools.map((t) => t.name) },
           "tools/list: no context hint",
         );
         return { tools: upstreamTools };
@@ -175,7 +180,7 @@ export class FilterProxy {
       );
 
       this.logger.debug(
-        { tools, filter: filterContext, metrics },
+        { tools: tools.map((t) => t.name), filter: filterContext, metrics },
         "tools/list: filtered by context",
       );
       return { tools };
